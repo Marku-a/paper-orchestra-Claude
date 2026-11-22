@@ -56,6 +56,22 @@ class CallClaudeCodeTest(unittest.TestCase):
         self.assertNotIn("--allowedTools", argv)
         self.assertEqual(run.call_args.kwargs["input"], "hello")
         self.assertTrue(run.call_args.kwargs["capture_output"])
+        self.assertEqual(run.call_args.kwargs["encoding"], "utf-8")
+        self.assertEqual(run.call_args.kwargs["errors"], "replace")
+        self.assertNotIn("text", run.call_args.kwargs)
+
+    def test_isolation_flags(self):
+        run = mock.Mock(return_value=_proc())
+        self._call(run, [{"type": "text", "text": "x"}], "m")
+        argv = run.call_args.args[0]
+        self.assertIn("--strict-mcp-config", argv)
+        self.assertIn("--no-session-persistence", argv)
+        self.assertEqual(argv[argv.index("--setting-sources") + 1], "project")
+
+    def test_bad_media_type_is_config_error(self):
+        blocks = [{"type": "image", "source": {"type": "base64", "media_type": "image/bmp", "data": "AA=="}}]
+        with self.assertRaises(cc.ClaudeCodeConfigError):
+            self._call(mock.Mock(), blocks, "m")
 
     def test_attachments_exist_during_call(self):
         seen = {}

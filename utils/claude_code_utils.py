@@ -34,6 +34,10 @@ class ClaudeCodeError(Exception):
     """A failed headless Claude Code invocation (retryable)."""
 
 
+class ClaudeCodeConfigError(ClaudeCodeError):
+    """A configuration/input error that retrying cannot fix."""
+
+
 def _build_prompt(content_blocks: list[dict], workdir: str) -> tuple[str, bool]:
     """Flattens content blocks into one prompt string. Attachments are written
     to files in workdir. Returns (prompt, has_attachments)."""
@@ -48,7 +52,7 @@ def _build_prompt(content_blocks: list[dict], workdir: str) -> tuple[str, bool]:
             media_type = source.get("media_type", "")
             ext = _EXT_BY_MEDIA_TYPE.get(media_type)
             if source.get("type") != "base64" or ext is None:
-                raise ClaudeCodeError(
+                raise ClaudeCodeConfigError(
                     f"Unsupported attachment for Claude Code: {btype} '{media_type}'"
                 )
             path = os.path.abspath(os.path.join(workdir, f"attachment_{i}.{ext}"))
@@ -59,7 +63,7 @@ def _build_prompt(content_blocks: list[dict], workdir: str) -> tuple[str, bool]:
                 f"[Attached file: {path} — open it with the Read tool before answering]"
             )
         else:
-            raise ClaudeCodeError(f"Unsupported content block type: {btype}")
+            raise ClaudeCodeConfigError(f"Unsupported content block type: {btype}")
     return "\n\n".join(parts), has_attachments
 
 
@@ -100,6 +104,11 @@ def call_claude_code(
             # dontAsk never prompts: anything not explicitly allowed is denied.
             "--permission-mode",
             "dontAsk",
+            # Isolate from the user's own setup (CLAUDE.md, hooks, MCP, sessions).
+            "--strict-mcp-config",
+            "--setting-sources",
+            "project",
+            "--no-session-persistence",
             # Restrict the available built-in tools ("" disables all of them).
             "--tools",
             ",".join(tools),
@@ -116,7 +125,8 @@ def call_claude_code(
                 argv,
                 input=prompt,
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout_sec,
                 cwd=workdir,
             )

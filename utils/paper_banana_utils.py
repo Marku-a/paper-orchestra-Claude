@@ -651,6 +651,11 @@ def _resolve_diagram_backend() -> str:
             "VERTEX_AI_PROJECT"
         )
         return "image" if has_gemini else "code"
+    if backend not in ("image", "code"):
+        print(
+            f"Warning: unknown PAPER_ORCHESTRA_DIAGRAM_BACKEND '{backend}'; using 'image'."
+        )
+        return "image"
     return backend
 
 

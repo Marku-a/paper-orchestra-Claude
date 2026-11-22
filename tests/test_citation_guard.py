@@ -81,6 +81,32 @@ class ParseTest(unittest.TestCase):
         self.assertTrue(entries[1]["raw"].startswith("@inproceedings{fake2020"))
 
 
+class NitsTest(_Base):
+    def test_clean_query_title(self):
+        self.assertEqual(
+            cg._clean_query_title('\\emph{X} and {BERT}: "Pre" \\& more'), "X and BERT: Pre & more"
+        )
+
+    def test_add_note_merges_existing(self):
+        raw = "@misc{k,\n  title = {T},\n  note = foo\n}"
+        out = cg._add_note(raw, "not_found")
+        self.assertEqual(out.count("note"), 1)
+        self.assertIn("note = {CITATION-GUARD: UNVERIFIED (not_found); } # foo", out)
+        out2 = cg._add_note("@misc{k,\n note = {abc}\n}", "not_found")
+        self.assertIn("note = {CITATION-GUARD: UNVERIFIED (not_found); abc}", out2)
+
+    def test_unparsed_reported(self):
+        d = tempfile.mkdtemp()
+        bib = os.path.join(d, "r.bib")
+        with open(bib, "w") as f:
+            f.write("@comment{x}\n@article(old, title = {Attention Is All You Need})\n" + BIB)
+        with mock.patch.object(cg.requests, "get", return_value=_s2("Attention Is All You Need")):
+            summary = cg.guard_bib_file(bib)
+        self.assertEqual(summary["unparsed"], 1)
+        self.assertEqual(summary["total"], 2)
+        self.assertIn("@article(old", open(os.path.join(d, "citation_report.md")).read())
+
+
 class VerifyTest(_Base):
     ENTRY = {"fields": {"title": "Attention Is All You Need", "year": "2017"}}
 

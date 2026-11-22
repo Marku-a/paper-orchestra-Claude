@@ -286,6 +286,32 @@ class RouterTests(unittest.TestCase):
 class ClaudeCodeBackendTests(unittest.TestCase):
     ENV = {"PAPER_ORCHESTRA_CLAUDE_BACKEND": "claude_code"}
 
+    def setUp(self):
+        p = mock.patch.object(au.shutil, "which", return_value="/usr/bin/claude")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_missing_binary_raised_once_no_sleep(self):
+        with mock.patch.dict("os.environ", self.ENV), mock.patch.object(
+            au.shutil, "which", return_value=None
+        ), mock.patch.object(
+            au.claude_code_utils, "call_claude_code"
+        ) as cc, mock.patch.object(au.time, "sleep") as sleep:
+            with self.assertRaises(au.ClaudeRequestError):
+                au.call_claude_with_text_prompt("hi", "claude-haiku-5-5")
+        cc.assert_not_called()
+        sleep.assert_not_called()
+
+    def test_config_error_not_retried(self):
+        err = au.claude_code_utils.ClaudeCodeConfigError("bad media")
+        with mock.patch.dict("os.environ", self.ENV), mock.patch.object(
+            au.claude_code_utils, "call_claude_code", side_effect=err
+        ) as cc, mock.patch.object(au.time, "sleep") as sleep:
+            with self.assertRaises(au.claude_code_utils.ClaudeCodeConfigError):
+                au.call_claude_with_text_prompt("hi", "claude-haiku-5-5")
+        self.assertEqual(cc.call_count, 1)
+        sleep.assert_not_called()
+
     def test_uses_claude_code_not_client(self):
         with mock.patch.dict("os.environ", self.ENV), mock.patch.object(
             au, "get_anthropic_client"
@@ -384,6 +410,11 @@ class SearchModelEnvTests(unittest.TestCase):
 
 
 class DiagramBackendTests(unittest.TestCase):
+    def test_unknown_value_warns_and_uses_image(self):
+        out, plot, img = self._run({"PAPER_ORCHESTRA_DIAGRAM_BACKEND": "bogus"})
+        self.assertEqual(out, "IMG")
+        plot.assert_not_called()
+
     def _run(self, env, clear=()):
         from utils import paper_banana_utils as pb
 

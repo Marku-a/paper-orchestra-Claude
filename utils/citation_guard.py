@@ -97,21 +97,35 @@ def _entry_end(text: str, start: int) -> int:
 
 def parse_bibtex(text: str) -> list[dict]:
     """Parses BibTeX into [{"type", "key", "fields": {lower-name: value}, "raw"}]."""
+    return _parse(text)[0]
+
+
+def _parse(text: str) -> tuple[list[dict], list[str]]:
+    """Returns (entries, unparsed raw snippets). @comment/@string/@preamble are skipped."""
     entries = []
+    unparsed: list[str] = []
     header = re.compile(r"@(\w+)\s*\{\s*([^,\s]*)\s*,", re.S)
     pos = 0
     while True:
-        m = re.compile(r"@(\w+)\s*\{").search(text, pos)
+        m = re.compile(r"@(\w+)\s*([{(])").search(text, pos)
         if not m:
             break
+        etype = m.group(1).lower()
+        if m.group(2) == "(":
+            nxt = re.compile(r"^\s*@", re.M).search(text, m.end())
+            end = nxt.start() if nxt else len(text)
+            pos = end
+            if etype not in ("comment", "string", "preamble"):
+                unparsed.append(text[m.start() : end].strip())
+            continue
         end = _entry_end(text, m.end() - 1)
         raw = text[m.start() : end]
         pos = end
-        etype = m.group(1).lower()
         if etype in ("comment", "string", "preamble"):
             continue
         h = header.match(raw)
         if not h:
+            unparsed.append(raw)
             continue
         fields: dict[str, str] = {}
         i = h.end()
@@ -138,7 +152,7 @@ def parse_bibtex(text: str) -> list[dict]:
             if cm:
                 i = cm.end()
         entries.append({"type": etype, "key": h.group(2), "fields": fields, "raw": raw})
-    return entries
+    return entries, unparsed
 
 
 # ------------------------------ Verification ------------------------------
@@ -148,6 +162,14 @@ def _normalize_title(title: str) -> str:
     title = re.sub(r"\\[a-zA-Z]+\s*", " ", title)  # latex commands
     title = re.sub(r"[{}\\$]", "", title)
     title = re.sub(r"[^a-z0-9 ]+", " ", title.lower())
+    return re.sub(r"\s+", " ", title).strip()
+
+
+def _clean_query_title(title: str) -> str:
+    """Strips LaTeX commands, braces and quotes so the title is a plain query."""
+    title = re.sub(r"\\[a-zA-Z]+\*?", " ", title)  # \emph{X} -> {X}
+    title = re.sub(r"\\(.)", r"\1", title)  # \& -> &
+    title = re.sub(r'[{}"]', "", title)
     return re.sub(r"\s+", " ", title).strip()
 
 
@@ -222,7 +244,7 @@ def verify_entry(entry: dict) -> dict:
     title = re.sub(r"\s+", " ", fields.get("title", "")).strip()
     if not title:
         return result
-    query_title = re.sub(r"[{}]", "", title)
+    query_title = _clean_query_title(title)
     year = _year_of(fields.get("year"))
     errors = []
     for source, search in (("semantic_scholar", _search_s2), ("arxiv", _search_arxiv)):
@@ -244,27 +266,28 @@ def verify_entry(entry: dict) -> dict:
 
 
 def _add_note(raw: str, status: str) -> str:
-    """Flags a raw entry. Prepends to an existing note field (BibTeX allows only
-    one), otherwise adds a note field before the closing brace."""
-    flag = f"{NOTE_PREFIX} ({status})"
-    existing = re.search(r"(\bnote\s*=\s*)([{\"])", raw, re.IGNORECASE)
-    if existing:
-        i = existing.end()
-        return f"{raw[:i]}{flag}; {raw[i:]}"
+    """Adds the guard note to a raw entry, merging into an existing note field."""
+    text = f"{NOTE_PREFIX} ({status})"
+    m = re.search(r"(?<![\w-])note\s*=\s*", raw, re.I)
+    if m:
+        i = m.end()
+        if raw[i] in '{"':
+            return raw[: i + 1] + text + "; " + raw[i + 1 :]
+        return raw[:i] + "{" + text + "; } # " + raw[i:]
     stripped = raw.rstrip()
     body = stripped[:-1].rstrip()
     if not body.endswith(","):
         body += ","
-    return f"{body}\n  note = {{{NOTE_PREFIX} ({status})}}\n}}"
+    return f"{body}\n  note = {{{text}}}\n}}"
 
 
 def guard_bib_file(bib_path: str, report_path: str | None = None, strict: bool = False) -> dict:
     with open(bib_path, "r", encoding="utf-8") as f:
         text = f.read()
-    entries = parse_bibtex(text)
+    entries, unparsed = _parse(text)
     results = [(e, verify_entry(e)) for e in entries]
 
-    counts = {"total": len(results), "verified": 0, "not_found": 0, "lookup_failed": 0}
+    counts = {"total": len(results), "verified": 0, "not_found": 0, "lookup_failed": 0, "unparsed": len(unparsed)}
     for _, r in results:
         counts[r["status"]] += 1
     unverified = [e["key"] for e, r in results if r["status"] != "verified"]
@@ -279,6 +302,7 @@ def guard_bib_file(bib_path: str, report_path: str | None = None, strict: bool =
         f"- Verified: {counts['verified']}",
         f"- Not found: {counts['not_found']}",
         f"- Lookup failed: {counts['lookup_failed']}",
+        f"- Unparsed: {counts['unparsed']}",
         "",
         "| key | title | status | source | matched title / url |",
         "| --- | --- | --- | --- | --- |",
@@ -292,6 +316,10 @@ def guard_bib_file(bib_path: str, report_path: str | None = None, strict: bool =
             " ".join(x for x in (r["match_title"], r["url"]) if x),
         ]
         lines.append("| " + " | ".join(c.replace("|", "\\|").replace("\n", " ") for c in cells) + " |")
+    if unparsed:
+        lines += ["", "## Unparsed entries (not checked)", ""]
+        for raw in unparsed:
+            lines.append("- `" + " ".join(raw.split())[:120].replace("`", "'") + "`")
     with open(report_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
@@ -306,11 +334,14 @@ def guard_bib_file(bib_path: str, report_path: str | None = None, strict: bool =
 
     print(
         f"Citation guard: {counts['verified']}/{counts['total']} verified, "
-        f"{counts['not_found']} not found, {counts['lookup_failed']} lookup failed "
+        f"{counts['not_found']} not found, {counts['lookup_failed']} lookup failed, "
+        f"{counts['unparsed']} unparsed "
         f"(report: {report_path})"
     )
     for key in unverified:
         print(f"Warning: citation '{key}' could not be verified.")
+    for raw in unparsed:
+        print(f"Warning: could not parse bib entry (unchecked): {' '.join(raw.split())[:80]}")
 
     if strict and unverified:
         raise ValueError(f"Unverified citations: {', '.join(unverified)}")

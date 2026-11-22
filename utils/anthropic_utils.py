@@ -16,6 +16,7 @@ from typing import Any, Optional
 import base64
 import mimetypes
 import os
+import shutil
 import threading
 import time
 
@@ -220,6 +221,13 @@ def call_claude_with_content(
     if web_search and not use_claude_code and not _google_search_note_printed:
         _google_search_note_printed = True
         print(_GOOGLE_SEARCH_NOTE)
+    if use_claude_code:
+        binary = os.environ.get("CLAUDE_CODE_BIN", "claude")
+        if shutil.which(binary) is None:
+            raise ClaudeRequestError(
+                f"Claude Code binary '{binary}' not found on PATH. Install Claude "
+                "Code or set CLAUDE_CODE_BIN."
+            )
     client = None if use_claude_code else get_anthropic_client()
     messages = [{"role": "user", "content": content_blocks}]
 
@@ -284,7 +292,10 @@ def call_claude_with_content(
                 "parsed_response": parsed_response,
             }
 
-        except (ClaudeRequestError,) + _NON_RETRYABLE_ERRORS as e:
+        except (
+            (ClaudeRequestError, claude_code_utils.ClaudeCodeConfigError)
+            + _NON_RETRYABLE_ERRORS
+        ) as e:
             print(
                 f"Warning: Claude API call (model={model_name}) failed with a non-retryable error. Error: {e}",
             )
