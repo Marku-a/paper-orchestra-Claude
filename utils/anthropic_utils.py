@@ -23,6 +23,7 @@ import anthropic  # type: ignore
 from dotenv import load_dotenv  # type: ignore
 from google.genai import types
 
+from utils import claude_code_utils
 from utils.gemini_utils import parse_gemini_json_results
 
 dot_file = os.path.join(os.path.dirname(__file__), "../.env")
@@ -48,8 +49,19 @@ _NON_RETRYABLE_ERRORS = (
 )
 
 
+_GOOGLE_SEARCH_NOTE = (
+    "Note: Google Search grounding is not available for Claude via the API backend; "
+    "candidates come from model knowledge and are verified against Semantic Scholar."
+)
+_google_search_note_printed = False
+
+
 class ClaudeRequestError(Exception):
     """A Claude request that should not be retried (refusal or unsupported config)."""
+
+
+def _use_claude_code_backend() -> bool:
+    return os.environ.get("PAPER_ORCHESTRA_CLAUDE_BACKEND", "api").lower() == "claude_code"
 
 
 def get_anthropic_client() -> anthropic.Anthropic:
@@ -149,8 +161,23 @@ def pdf_block_from_path(path: str) -> dict:
     }
 
 
+def _is_google_search_tools(tools) -> bool:
+    return (
+        isinstance(tools, (list, tuple))
+        and len(tools) > 0
+        and all(
+            isinstance(t, types.Tool) and getattr(t, "google_search", None) is not None
+            for t in tools
+        )
+    )
+
+
 def _build_request_kwargs(model_name: str, generation_configs: Optional[dict]) -> dict:
-    """Maps google-genai style generation_configs onto Messages API arguments."""
+    """Maps google-genai style generation_configs onto Messages API arguments.
+
+    A google_search tool is not an error: it sets the private key "web_search"
+    (True), which the caller must pop before any API call.
+    """
     kwargs: dict[str, Any] = {"max_tokens": DEFAULT_MAX_TOKENS}
     for k, v in (generation_configs or {}).items():
         if k == "system_instruction":
@@ -164,6 +191,8 @@ def _build_request_kwargs(model_name: str, generation_configs: Optional[dict]) -
             continue
         elif k == "max_output_tokens":
             kwargs["max_tokens"] = v
+        elif k == "tools" and _is_google_search_tools(v):
+            kwargs["web_search"] = True
         else:
             raise ClaudeRequestError(
                 f"generation_configs key '{k}' is not supported for Claude models"
@@ -184,51 +213,65 @@ def call_claude_with_content(
     parsed_response = None
 
     # Raised before any API call (config errors, missing key).
+    global _google_search_note_printed
     request_kwargs = _build_request_kwargs(model_name, generation_configs)
-    client = get_anthropic_client()
+    web_search = request_kwargs.pop("web_search", False)
+    use_claude_code = _use_claude_code_backend()
+    if web_search and not use_claude_code and not _google_search_note_printed:
+        _google_search_note_printed = True
+        print(_GOOGLE_SEARCH_NOTE)
+    client = None if use_claude_code else get_anthropic_client()
     messages = [{"role": "user", "content": content_blocks}]
 
     for attempt in range(max_retries):
         try:
-            if model_name.lower().startswith(_FALLBACK_MODEL_PREFIXES):
-                stream_cm = client.beta.messages.stream(
-                    model=model_name,
-                    messages=messages,
-                    betas=[_FALLBACK_BETA],
-                    fallbacks="default",
-                    **request_kwargs,
+            if use_claude_code:
+                raw_response = claude_code_utils.call_claude_code(
+                    content_blocks,
+                    model_name,
+                    system=request_kwargs.get("system"),
+                    allow_web_search=web_search,
                 )
             else:
-                stream_cm = client.messages.stream(
-                    model=model_name,
-                    messages=messages,
-                    **request_kwargs,
-                )
-            with stream_cm as stream:
-                msg = stream.get_final_message()
+                if model_name.lower().startswith(_FALLBACK_MODEL_PREFIXES):
+                    stream_cm = client.beta.messages.stream(
+                        model=model_name,
+                        messages=messages,
+                        betas=[_FALLBACK_BETA],
+                        fallbacks="default",
+                        **request_kwargs,
+                    )
+                else:
+                    stream_cm = client.messages.stream(
+                        model=model_name,
+                        messages=messages,
+                        **request_kwargs,
+                    )
+                with stream_cm as stream:
+                    msg = stream.get_final_message()
 
-            if msg.stop_reason == "refusal":
-                raise ClaudeRequestError(
-                    f"Claude refused the request (model={model_name}). "
-                    f"stop_details: {msg.stop_details}"
-                )
-            if msg.stop_reason == "max_tokens":
-                print(
-                    f"Warning: Claude response (model={model_name}) was truncated at max_tokens."
-                )
+                if msg.stop_reason == "refusal":
+                    raise ClaudeRequestError(
+                        f"Claude refused the request (model={model_name}). "
+                        f"stop_details: {msg.stop_details}"
+                    )
+                if msg.stop_reason == "max_tokens":
+                    print(
+                        f"Warning: Claude response (model={model_name}) was truncated at max_tokens."
+                    )
 
-            # With server-side fallback, content can hold a partial answer from
-            # the declining model, then a "fallback" block, then the full answer.
-            # Keep only the text after the last fallback block.
-            last_fallback = max(
-                (i for i, b in enumerate(msg.content) if b.type == "fallback"),
-                default=-1,
-            )
-            raw_response = "".join(
-                block.text
-                for block in msg.content[last_fallback + 1 :]
-                if block.type == "text"
-            )
+                # With server-side fallback, content can hold a partial answer from
+                # the declining model, then a "fallback" block, then the full answer.
+                # Keep only the text after the last fallback block.
+                last_fallback = max(
+                    (i for i, b in enumerate(msg.content) if b.type == "fallback"),
+                    default=-1,
+                )
+                raw_response = "".join(
+                    block.text
+                    for block in msg.content[last_fallback + 1 :]
+                    if block.type == "text"
+                )
             parsed_response = result_parsing_func(raw_response)
 
             if check_parsed_response_not_none:

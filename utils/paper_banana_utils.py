@@ -643,6 +643,17 @@ def critique_and_revise_figure(
     return revised_description, critic_suggestions
 
 
+def _resolve_diagram_backend() -> str:
+    """PAPER_ORCHESTRA_DIAGRAM_BACKEND: "image" (default), "code" or "auto"."""
+    backend = os.environ.get("PAPER_ORCHESTRA_DIAGRAM_BACKEND", "image").lower()
+    if backend == "auto":
+        has_gemini = os.environ.get("GEMINI_API_KEY") or os.environ.get(
+            "VERTEX_AI_PROJECT"
+        )
+        return "image" if has_gemini else "code"
+    return backend
+
+
 def generate_figure_visuals(
     task_name: str,
     figure_description: str,
@@ -667,6 +678,19 @@ def generate_figure_visuals(
         code_text = response_dict["parsed_response"]
         base64_img = execute_plot_code_worker(code_text)
         return base64_img
+    elif _resolve_diagram_backend() == "code":
+        prompt_text = f"Use python matplotlib to draw a diagram (boxes, arrows and text labels, no figure title, aspect ratio {aspect_ratio}) based on the following detailed description: {figure_description}\n Only provide the python matplotlib code without any explanations. Code:"
+        contents = [
+            types.Part.from_text(text=DIAGRAM_VISUALIZER_AGENT_SYSTEM_PROMPT),
+            types.Part.from_text(text=prompt_text),
+        ]
+        response_dict = call_llm_with_contents(
+            contents=contents,
+            model_name=model_name,
+            result_parsing_func=identity_parse,
+        )
+        code_text = response_dict["parsed_response"]
+        return execute_plot_code_worker(code_text)
     else:
         # Prompt for diagram image generation
         prompt_text = f"Render an image based on the following detailed description: {figure_description}\n Note that do not include figure titles in the image. Diagram: "

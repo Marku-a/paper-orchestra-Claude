@@ -25,7 +25,7 @@ from google.genai import types  # type: ignore
 from methods.prompts.literature_review_agent import (
     literature_review_agent_writter_prompt,
 )
-from utils.gemini_utils import call_gemini_with_contents, parse_gemini_latex_results
+from utils.gemini_utils import parse_gemini_latex_results
 from utils.llm_backend_utils import call_llm_with_contents
 from utils.scholar_utils import s2_title_search
 
@@ -462,8 +462,10 @@ class HybridLiteratureAgent:
             {DiscoveryResult.model_json_schema()}
             """
 
-        response_dict = call_gemini_with_contents(
-            model_name="gemini-3-flash-preview",
+        response_dict = call_llm_with_contents(
+            model_name=os.environ.get(
+                "PAPER_ORCHESTRA_SEARCH_MODEL", "gemini-3-flash-preview"
+            ),
             contents=[prompt],
             generation_configs={
                 "tools": [self.google_search_tool],

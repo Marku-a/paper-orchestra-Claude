@@ -25,6 +25,7 @@ from methods.agents.literature_review_agent import HybridLiteratureAgent
 from methods.agents.section_writing_agent import SectionWritingAgent
 from methods.agents.content_refinement_agent import ContentRefinementAgent
 
+from utils.citation_guard import guard_bib_file
 from utils.common_utils import (
     create_log_folder,
 )
@@ -130,6 +131,20 @@ def write_single_paper(
                 osp.join(literature_agent_output_dir, "references.bib"),
                 osp.join(latex_writeup_dir, "references.bib"),
             )
+            if os.environ.get("PAPER_ORCHESTRA_CITATION_GUARD", "0") == "1":
+                strict = os.environ.get("PAPER_ORCHESTRA_CITATION_GUARD_STRICT") == "1"
+                try:
+                    guard_bib_file(
+                        osp.join(latex_writeup_dir, "references.bib"), strict=strict
+                    )
+                except ValueError:
+                    if strict:
+                        raise
+                    print("Warning: citation guard failed.")
+                    traceback.print_exc()
+                except Exception:
+                    print("Warning: citation guard failed.")
+                    traceback.print_exc()
 
             ###############################################################################################
             # Step 3. Call SectionWritingAgent

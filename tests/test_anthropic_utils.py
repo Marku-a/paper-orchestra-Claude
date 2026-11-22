@@ -283,5 +283,147 @@ class RouterTests(unittest.TestCase):
                 self.assertEqual(self._run(kind, "gpt-5"), expected_gpt)
 
 
+class ClaudeCodeBackendTests(unittest.TestCase):
+    ENV = {"PAPER_ORCHESTRA_CLAUDE_BACKEND": "claude_code"}
+
+    def test_uses_claude_code_not_client(self):
+        with mock.patch.dict("os.environ", self.ENV), mock.patch.object(
+            au, "get_anthropic_client"
+        ) as client, mock.patch.object(
+            au.claude_code_utils, "call_claude_code", return_value='{"ok": true}'
+        ) as cc:
+            res = au.call_claude_with_text_prompt(
+                "hi",
+                "claude-haiku-5-5",
+                generation_configs={"system_instruction": "sys"},
+            )
+        client.assert_not_called()
+        self.assertEqual(res["parsed_response"], {"ok": True})
+        self.assertEqual(cc.call_args.args[1], "claude-haiku-5-5")
+        self.assertEqual(cc.call_args.kwargs["system"], "sys")
+        self.assertFalse(cc.call_args.kwargs["allow_web_search"])
+
+    def test_claude_code_error_is_retried(self):
+        err = au.claude_code_utils.ClaudeCodeError("boom")
+        with mock.patch.dict("os.environ", self.ENV), mock.patch.object(
+            au.claude_code_utils, "call_claude_code", side_effect=[err, '{"a": 1}']
+        ) as cc, mock.patch.object(au.time, "sleep"):
+            res = au.call_claude_with_text_prompt("hi", "claude-haiku-5-5")
+        self.assertEqual(cc.call_count, 2)
+        self.assertEqual(res["parsed_response"], {"a": 1})
+
+    def test_google_search_enables_web_search(self):
+        tool = types.Tool(google_search=types.GoogleSearch())
+        with mock.patch.dict("os.environ", self.ENV), mock.patch.object(
+            au.claude_code_utils, "call_claude_code", return_value='{"a": 1}'
+        ) as cc:
+            au.call_claude_with_text_prompt(
+                "hi", "claude-haiku-5-5", generation_configs={"tools": [tool]}
+            )
+        self.assertTrue(cc.call_args.kwargs["allow_web_search"])
+
+    def test_google_search_dropped_on_api_backend(self):
+        tool = types.Tool(google_search=types.GoogleSearch())
+        client = _fake_client([_msg()])
+        env = {"PAPER_ORCHESTRA_CLAUDE_BACKEND": "api"}
+        with mock.patch.dict("os.environ", env), mock.patch.object(
+            au, "get_anthropic_client", return_value=client
+        ):
+            au.call_claude_with_text_prompt(
+                "hi", "claude-haiku-5-5", generation_configs={"tools": [tool]}
+            )
+        self.assertNotIn("tools", client.messages.stream.call_args.kwargs)
+        self.assertNotIn("web_search", client.messages.stream.call_args.kwargs)
+
+    def test_other_tools_still_error(self):
+        with self.assertRaises(au.ClaudeRequestError):
+            au._build_request_kwargs("claude-haiku-5-5", {"tools": ["x"]})
+
+
+class SearchModelEnvTests(unittest.TestCase):
+    def _run(self, env):
+        from utils import content_parsing_utils as cp
+
+        gem = mock.Mock(return_value={"raw_response": " T ", "parsed_response": None})
+        cla = mock.Mock(return_value={"raw_response": " T ", "parsed_response": None})
+        with mock.patch.dict("os.environ", env), mock.patch.object(
+            lb, "call_gemini_with_text_prompt", gem
+        ), mock.patch.object(lb, "call_claude_with_text_prompt", cla):
+            os_env = __import__("os").environ
+            if "PAPER_ORCHESTRA_SEARCH_MODEL" not in env:
+                os_env.pop("PAPER_ORCHESTRA_SEARCH_MODEL", None)
+            out = cp.extract_paper_title_from_citation("x")
+        self.assertEqual(out, "T")
+        return gem, cla
+
+    def test_default_reaches_gemini(self):
+        gem, cla = self._run({})
+        self.assertEqual(gem.call_args.kwargs["model_name"], "gemini-3-flash-preview")
+        cla.assert_not_called()
+
+    def test_claude_override(self):
+        gem, cla = self._run({"PAPER_ORCHESTRA_SEARCH_MODEL": "claude-sonnet-5-5"})
+        gem.assert_not_called()
+        self.assertEqual(cla.call_args.kwargs["model_name"], "claude-sonnet-5-5")
+
+    def test_literature_agent_uses_router(self):
+        from methods.agents import literature_review_agent as lra
+
+        fake = mock.Mock(return_value={"parsed_response": {"candidates": [1]}})
+        agent = mock.Mock()
+        task = {"search_type": "targeted", "focus": "f", "context": "c"}
+        with mock.patch.object(lra, "call_llm_with_contents", fake):
+            with mock.patch.dict("os.environ", {"PAPER_ORCHESTRA_SEARCH_MODEL": "claude-sonnet-5-5"}):
+                out = lra.HybridLiteratureAgent._discover_candidates(agent, task, {}, "2025")
+            self.assertEqual(fake.call_args.kwargs["model_name"], "claude-sonnet-5-5")
+            self.assertEqual(out, [1])
+            with mock.patch.dict("os.environ", clear=False) as e:
+                e.pop("PAPER_ORCHESTRA_SEARCH_MODEL", None)
+                lra.HybridLiteratureAgent._discover_candidates(agent, task, {}, "2025")
+            self.assertEqual(fake.call_args.kwargs["model_name"], "gemini-3-flash-preview")
+
+
+class DiagramBackendTests(unittest.TestCase):
+    def _run(self, env, clear=()):
+        from utils import paper_banana_utils as pb
+
+        with mock.patch.dict("os.environ", env), mock.patch.object(
+            pb, "call_llm_with_contents", return_value={"parsed_response": "code"}
+        ), mock.patch.object(
+            pb, "execute_plot_code_worker", return_value="PLOT"
+        ) as plot, mock.patch.object(
+            pb, "generate_image_with_gemini", return_value="IMG"
+        ) as img:
+            for k in clear:
+                __import__("os").environ.pop(k, None)
+            out = pb.generate_figure_visuals("diagram", "desc")
+        return out, plot, img
+
+    def test_code(self):
+        out, plot, img = self._run({"PAPER_ORCHESTRA_DIAGRAM_BACKEND": "code"})
+        self.assertEqual(out, "PLOT")
+        plot.assert_called_once_with("code")
+        img.assert_not_called()
+
+    def test_image_default(self):
+        out, plot, img = self._run({}, clear=("PAPER_ORCHESTRA_DIAGRAM_BACKEND",))
+        self.assertEqual(out, "IMG")
+        plot.assert_not_called()
+
+    def test_auto_without_gemini_env(self):
+        out, plot, img = self._run(
+            {"PAPER_ORCHESTRA_DIAGRAM_BACKEND": "auto"},
+            clear=("GEMINI_API_KEY", "VERTEX_AI_PROJECT"),
+        )
+        self.assertEqual(out, "PLOT")
+        img.assert_not_called()
+
+    def test_auto_with_gemini_env(self):
+        out, plot, img = self._run(
+            {"PAPER_ORCHESTRA_DIAGRAM_BACKEND": "auto", "GEMINI_API_KEY": "k"}
+        )
+        self.assertEqual(out, "IMG")
+
+
 if __name__ == "__main__":
     unittest.main()
